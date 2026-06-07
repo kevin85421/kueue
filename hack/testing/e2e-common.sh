@@ -41,7 +41,10 @@ export E2E_SKIP_REINSTALL="${E2E_SKIP_REINSTALL:-false}"
 # when they already exist locally / on kind worker nodes. CI mode always pulls and loads.
 export E2E_SKIP_IMAGE_RELOAD="${E2E_SKIP_IMAGE_RELOAD:-false}"
 
-export KIND_VERSION="${E2E_KIND_VERSION/"kindest/node:v"/}"
+# Use prefix removal (#) rather than pattern substitution: a quoted pattern
+# containing "/" inside ${var/pattern/} is mis-parsed by bash 3.2 (macOS's
+# /bin/bash), yielding a garbled version that breaks local e2e runs.
+export KIND_VERSION="${E2E_KIND_VERSION#kindest/node:v}"
 
 function build_kind_node_image {
     if [[ "$E2E_KIND_VERSION" != kindest/node:v* ]]; then
