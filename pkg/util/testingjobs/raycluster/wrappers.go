@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 )
@@ -173,19 +174,28 @@ func (j *ClusterWrapper) WithEnableAutoscaling(value *bool) *ClusterWrapper {
 	return j
 }
 
-// SchedulingGate adds a scheduling gate to the head group and every worker group template.
-func (j *ClusterWrapper) SchedulingGate(name string) *ClusterWrapper {
-	gate := corev1.PodSchedulingGate{Name: name}
+func (j *ClusterWrapper) ScaleFirstWorkerGroup(replicas int32) *ClusterWrapper {
+	j.Spec.WorkerGroupSpecs[0].Replicas = &replicas
+	return j
+}
+
+// ElasticSchedulingGates adds the elastic-job scheduling gate to the head group and
+// every worker group, as required for elastic RayClusters.
+func (j *ClusterWrapper) ElasticSchedulingGates() *ClusterWrapper {
+	gate := corev1.PodSchedulingGate{Name: kueue.ElasticJobSchedulingGate}
 	j.Spec.HeadGroupSpec.Template.Spec.SchedulingGates = append(j.Spec.HeadGroupSpec.Template.Spec.SchedulingGates, gate)
 	for i := range j.Spec.WorkerGroupSpecs {
-		wgs := &j.Spec.WorkerGroupSpecs[i]
-		wgs.Template.Spec.SchedulingGates = append(wgs.Template.Spec.SchedulingGates, gate)
+		j.Spec.WorkerGroupSpecs[i].Template.Spec.SchedulingGates = append(j.Spec.WorkerGroupSpecs[i].Template.Spec.SchedulingGates, gate)
 	}
 	return j
 }
 
-func (j *ClusterWrapper) ScaleFirstWorkerGroup(replicas int32) *ClusterWrapper {
-	j.Spec.WorkerGroupSpecs[0].Replicas = &replicas
+// FirstWorkerGroupReplicas pins replicas, minReplicas and maxReplicas of the first worker group.
+func (j *ClusterWrapper) FirstWorkerGroupReplicas(replicas, minReplicas, maxReplicas int32) *ClusterWrapper {
+	wgs := &j.Spec.WorkerGroupSpecs[0]
+	wgs.Replicas = ptr.To(replicas)
+	wgs.MinReplicas = ptr.To(minReplicas)
+	wgs.MaxReplicas = ptr.To(maxReplicas)
 	return j
 }
 
