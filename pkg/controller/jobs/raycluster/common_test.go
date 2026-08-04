@@ -44,6 +44,7 @@ import (
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingrayutil "sigs.k8s.io/kueue/pkg/util/testingjobs/raycluster"
+	testingrayjobutil "sigs.k8s.io/kueue/pkg/util/testingjobs/rayjob"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
 
@@ -460,6 +461,26 @@ func TestUpdatePodSets(t *testing.T) {
 			wantPodSets: []kueue.PodSet{
 				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
 				*utiltestingapi.MakePodSet("workers", 3).Obj(),
+			},
+		},
+		// On a MultiKueue manager the child RayCluster only exists on the worker
+		// cluster; its counts are reflected as an annotation by the MultiKueue
+		// workload controller and used as the fallback source.
+		"child raycluster absent - counts fall back to the MultiKueue runtime annotation": {
+			podSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 3).Obj(),
+			},
+			object: testingrayjobutil.MakeJob("rayjob-owner", "ns").
+				ManagedBy(kueue.MultiKueueControllerName).
+				Annotation("kueue.x-k8s.io/elastic-job", "true").
+				Annotation(RayClusterPodsetReplicaSizesAnnotation, `[{"name":"workers","count":5}]`).
+				Obj(),
+			enableInTreeAutoscaling: new(true),
+			rayClusterName:          "nonexistent-child",
+			wantPodSets: []kueue.PodSet{
+				*utiltestingapi.MakePodSet(headGroupPodSetName, 1).Obj(),
+				*utiltestingapi.MakePodSet("workers", 5).Obj(),
 			},
 		},
 		"empty rayClusterName - no update": {
@@ -1284,43 +1305,6 @@ func TestParsePodSetReplicaSizes(t *testing.T) {
 	}
 }
 
-func TestSerializePodSetCounts(t *testing.T) {
-	testCases := map[string]struct {
-		podSets  []kueue.PodSet
-		wantJSON string
-	}{
-		"single podset": {
-			podSets: []kueue.PodSet{
-				{Name: "head", Count: 1},
-			},
-			wantJSON: `[{"name":"head","count":1}]`,
-		},
-		"multiple podsets": {
-			podSets: []kueue.PodSet{
-				{Name: "head", Count: 1},
-				{Name: "worker", Count: 5},
-			},
-			wantJSON: `[{"name":"head","count":1},{"name":"worker","count":5}]`,
-		},
-		"empty podsets": {
-			podSets:  []kueue.PodSet{},
-			wantJSON: `[]`,
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			got, err := SerializePodSetCounts(tc.podSets)
-			if err != nil {
-				t.Fatalf("SerializePodSetCounts() unexpected error: %v", err)
-			}
-			if string(got) != tc.wantJSON {
-				t.Errorf("SerializePodSetCounts() = %s, want %s", string(got), tc.wantJSON)
-			}
-		})
-	}
-}
-
 func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 	testCases := map[string]struct {
 		annotations      map[string]string
@@ -1354,8 +1338,7 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			registerRayType:  true,
 			createRayCluster: true,
 			wantAnnotation: map[string]string{
-				RayClusterGenerationAnnotation:         "0",
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
+				RayClusterGenerationAnnotation: "0",
 			},
 		},
 		"standalone raycluster does not track its own generation": {
@@ -1370,14 +1353,11 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			registerRayType:  true,
 			createRayCluster: true,
 			standalone:       true,
-			wantAnnotation: map[string]string{
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
-			},
+			wantAnnotation:   nil,
 		},
 		"returns annotations even when counts match existing annotation": {
 			annotations: map[string]string{
-				workloadslicing.EnabledAnnotationKey:   workloadslicing.EnabledAnnotationValue,
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
+				workloadslicing.EnabledAnnotationKey: workloadslicing.EnabledAnnotationValue,
 			},
 			podSets: []kueue.PodSet{
 				{Name: "head", Count: 1},
@@ -1387,14 +1367,12 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			registerRayType:  true,
 			createRayCluster: true,
 			wantAnnotation: map[string]string{
-				RayClusterGenerationAnnotation:         "0",
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
+				RayClusterGenerationAnnotation: "0",
 			},
 		},
 		"updated when counts differ": {
 			annotations: map[string]string{
-				workloadslicing.EnabledAnnotationKey:   workloadslicing.EnabledAnnotationValue,
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
+				workloadslicing.EnabledAnnotationKey: workloadslicing.EnabledAnnotationValue,
 			},
 			podSets: []kueue.PodSet{
 				{Name: "head", Count: 1},
@@ -1404,11 +1382,13 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			registerRayType:  true,
 			createRayCluster: true,
 			wantAnnotation: map[string]string{
-				RayClusterGenerationAnnotation:         "0",
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":5}]`,
+				RayClusterGenerationAnnotation: "0",
 			},
 		},
-		"raycluster not found returns annotations with empty generation": {
+		// On a MultiKueue manager the child RayCluster only exists on the worker
+		// cluster; the generation annotation is maintained by the MultiKueue
+		// workload controller there and must not be clobbered with an empty value.
+		"raycluster not found preserves the generation annotation": {
 			annotations: map[string]string{
 				workloadslicing.EnabledAnnotationKey: workloadslicing.EnabledAnnotationValue,
 			},
@@ -1418,10 +1398,7 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 			},
 			rayClusterName:  "nonexistent-raycluster",
 			registerRayType: true,
-			wantAnnotation: map[string]string{
-				RayClusterGenerationAnnotation:         "",
-				RayClusterPodsetReplicaSizesAnnotation: `[{"name":"head","count":1},{"name":"worker","count":3}]`,
-			},
+			wantAnnotation:  nil,
 		},
 		"other get error returns error": {
 			annotations: map[string]string{
@@ -1470,7 +1447,7 @@ func TestGetWorkloadslicingCustomAnnotations(t *testing.T) {
 				jobObject = &corev1.ConfigMap{ObjectMeta: *obj}
 			}
 
-			got, err := GetWorkloadslicingRayClusterCustomAnnotations(t.Context(), c, jobObject, tc.podSets, tc.rayClusterName)
+			got, err := GetWorkloadslicingRayClusterCustomAnnotations(t.Context(), c, jobObject, tc.rayClusterName)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("GetWorkloadslicingCustomAnnotations() expected error but got nil")
