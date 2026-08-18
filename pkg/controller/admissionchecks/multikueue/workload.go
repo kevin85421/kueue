@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -53,6 +54,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/metrics"
 	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	"sigs.k8s.io/kueue/pkg/util/api"
+	"sigs.k8s.io/kueue/pkg/util/csv"
 	utilmaps "sigs.k8s.io/kueue/pkg/util/maps"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -837,12 +839,37 @@ func (w *wlReconciler) syncToSingleCluster(ctx context.Context, log klog.Logger,
 	return reconcile.Result{}, errors.Join(errs...)
 }
 
-// nominatedClusterSetsEqual reports whether stored and current contain the same set of cluster names,
-// independent of order.
-func nominatedClusterSetsEqual(stored, current []string) bool {
-	slices.Sort(stored)
-	slices.Sort(current)
-	return slices.Equal(stored, current)
+// userNominatedClusters returns the MultiKueue cluster names the user requested via
+// the MultiKueueClusterNames annotation on the workload, if the feature is enabled
+// and the annotation is present and non-empty.
+func userNominatedClusters(wl *kueue.Workload) ([]string, bool) {
+	if !features.Enabled(features.MultiKueueClusterNames) {
+		return nil, false
+	}
+	raw, ok := wl.Annotations[kueue.MultiKueueClusterNamesAnnotation]
+	if !ok {
+		return nil, false
+	}
+	clusters := csv.Parse(raw)
+	if len(clusters) == 0 {
+		return nil, false
+	}
+	return clusters, true
+}
+
+// intersectAuthorizedClusters keeps only the requested clusters that are in the
+// workload's authorized set (the remotes derived from its MultiKueueConfig). A user
+// can only narrow the authorized set, never widen it. The result is sorted and
+// deduplicated for a stable nomination.
+func intersectAuthorizedClusters(requested []string, authorized map[string]*kueue.Workload) []string {
+	out := make([]string, 0, len(requested))
+	for _, c := range requested {
+		if _, ok := authorized[c]; ok {
+			out = append(out, c)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group *wlGroup) (reconcile.Result, error) {
@@ -901,6 +928,11 @@ func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group 
 	}
 
 	var nominatedWorkers []string
+	// persistNomination controls whether the computed nomination is written back to
+	// Status.NominatedClusterNames below. Elastic workloads already have
+	// Status.ClusterName set (mutually exclusive with NominatedClusterNames), and the
+	// incremental/external dispatchers own the field, so neither persists here.
+	persistNomination := false
 
 	// For elastic workloads, retrieve the remote cluster where the original workload was scheduled.
 	// For now, new workload slices will continue to be assigned to the same cluster.
@@ -908,23 +940,37 @@ func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group 
 	// supporting preferred or required placement constraints.
 	if clusterName := workload.ClusterName(group.local); group.IsElasticWorkload() && clusterName != "" {
 		nominatedWorkers = []string{clusterName}
+	} else if requested, ok := userNominatedClusters(group.local); ok {
+		nominatedWorkers = intersectAuthorizedClusters(requested, group.remotes)
+		if len(nominatedWorkers) == 0 {
+			log.V(2).Info("None of the user-requested MultiKueue clusters are authorized for this workload; leaving it unscheduled",
+				"workload", klog.KObj(group.local), "requestedClusters", requested)
+		}
+		persistNomination = true
 	} else if w.dispatcherName == config.MultiKueueDispatcherModeAllAtOnce {
 		for workerName := range group.remotes {
 			nominatedWorkers = append(nominatedWorkers, workerName)
 		}
-
-		if !nominatedClusterSetsEqual(group.local.Status.NominatedClusterNames, nominatedWorkers) {
-			if err := workloadpatching.PatchAdmissionStatus(ctx, w.client, group.local, w.clock, func(wl *kueue.Workload) (bool, error) {
-				wl.Status.NominatedClusterNames = nominatedWorkers
-				return true, nil
-			}); err != nil {
-				log.V(2).Error(err, "Failed to patch nominated clusters", "workload", klog.KObj(group.local))
-				return reconcile.Result{}, err
-			}
-		}
+		persistNomination = true
 	} else {
 		// Incremental dispatcher and External dispatcher path
 		nominatedWorkers = group.local.Status.NominatedClusterNames
+	}
+
+	if persistNomination {
+		if err := workloadpatching.PatchAdmissionStatus(ctx, w.client, group.local, w.clock, func(wl *kueue.Workload) (bool, error) {
+			if sets.New(wl.Status.NominatedClusterNames...).Equal(sets.New(nominatedWorkers...)) {
+				return false, nil
+			}
+			// nominatedWorkers may come from map iteration (AllAtOnce), so sort only when
+			// we are about to persist, for a stable stored nomination.
+			slices.Sort(nominatedWorkers)
+			wl.Status.NominatedClusterNames = nominatedWorkers
+			return true, nil
+		}); err != nil {
+			log.V(2).Error(err, "Failed to patch nominated clusters", "workload", klog.KObj(group.local))
+			return reconcile.Result{}, err
+		}
 	}
 
 	var errs []error

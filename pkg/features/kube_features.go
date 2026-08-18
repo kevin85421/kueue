@@ -522,6 +522,12 @@ const (
 	// pods per group without accounting for quota. Recreate the LeaderWorkerSet to change
 	// the size, or disable this gate to accept the previous behavior.
 	LWSImmutableGroupSize featuregate.Feature = "LWSImmutableGroupSize"
+
+	// owner: @kevin85421
+	//
+	// Enables users to restrict, via the kueue.x-k8s.io/multikueue-cluster-names annotation,
+	// which MultiKueue worker clusters a Workload may be dispatched to.
+	MultiKueueClusterNames featuregate.Feature = "MultiKueueClusterNames"
 )
 
 func init() {
@@ -821,6 +827,10 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 
 	LWSImmutableGroupSize: {
 		{Version: version.MustParse("0.20"), Default: true, PreRelease: featuregate.Beta},
+	},
+
+	MultiKueueClusterNames: {
+		{Version: version.MustParse("0.20"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }
 
