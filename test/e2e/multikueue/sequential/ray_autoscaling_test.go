@@ -35,6 +35,7 @@ import (
 	workloadjob "sigs.k8s.io/kueue/pkg/controller/jobs/job"
 	workloadraycluster "sigs.k8s.io/kueue/pkg/controller/jobs/raycluster"
 	workloadrayjob "sigs.k8s.io/kueue/pkg/controller/jobs/rayjob"
+	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
 	"sigs.k8s.io/kueue/pkg/util/podset"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
 	testingraycluster "sigs.k8s.io/kueue/pkg/util/testingjobs/raycluster"
@@ -108,6 +109,20 @@ func liveRayWorkloadSlice(g gomega.Gomega, c client.Client, ns, sliceName string
 	return &live[0]
 }
 
+func replacementRayWorkloadSlice(g gomega.Gomega, c client.Client, oldSlice *kueue.Workload) *kueue.Workload {
+	wls := &kueue.WorkloadList{}
+	g.Expect(c.List(ctx, wls, client.InNamespace(oldSlice.Namespace))).To(gomega.Succeed())
+	var replacement *kueue.Workload
+	for i := range wls.Items {
+		if replaced := workloadslicing.ReplacementForKey(&wls.Items[i]); replaced != nil && *replaced == workload.Key(oldSlice) {
+			replacement = &wls.Items[i]
+			break
+		}
+	}
+	g.Expect(replacement).NotTo(gomega.BeNil())
+	return replacement
+}
+
 func registerRayAutoscalingTests(testContext func() rayAutoscalingTestContext) {
 	ginkgo.Describe("Ray worker-side autoscaling", ginkgo.Ordered, ginkgo.Label("feature:kuberay", util.Shard1), func() {
 		var defaultManagerKueueCfg, defaultWorker1KueueCfg, defaultWorker2KueueCfg *kueueconfig.Configuration
@@ -170,6 +185,15 @@ func registerRayAutoscalingTests(testContext func() rayAutoscalingTestContext) {
 			runRayClusterAutoscalingTest(tc.managerNs, tc.managerCq, tc.managerLq, tc.multiKueueAc, kubernetesClients)
 		})
 
+		ginkgo.It("Should admit two consecutive RayCluster scale-ups one worker at a time", func() {
+			tc := testContext()
+			kubernetesClients := rayKubernetesClientsMap{
+				tc.workerCluster1.Name: {client: k8sWorker1Client, restClient: worker1RestClient, cfg: worker1Cfg},
+				tc.workerCluster2.Name: {client: k8sWorker2Client, restClient: worker2RestClient, cfg: worker2Cfg},
+			}
+			runRayClusterSequentialScaleUpTest(tc.managerNs, tc.managerCq, tc.managerLq, tc.multiKueueAc, kubernetesClients)
+		})
+
 		ginkgo.It("Should re-admit a preempted autoscaled RayCluster using the replicas from the manager spec", func() {
 			tc := testContext()
 			kubernetesClients := rayKubernetesClientsMap{
@@ -185,6 +209,149 @@ func registerRayAutoscalingTests(testContext func() rayAutoscalingTestContext) {
 				kubernetesClients,
 			)
 		})
+	})
+}
+
+func runRayClusterSequentialScaleUpTest(
+	managerNs *corev1.Namespace,
+	managerCq *kueue.ClusterQueue,
+	managerLq *kueue.LocalQueue,
+	multiKueueAc *kueue.AdmissionCheck,
+	kubernetesClients rayKubernetesClientsMap,
+) {
+	const (
+		workerResource = "worker-unit"
+		actorA         = "raycluster-sequential-scale-up-actor-a"
+		actorB         = "raycluster-sequential-scale-up-actor-b"
+	)
+
+	setManagerCPUQuota := func(value string) {
+		gomega.Eventually(func(g gomega.Gomega) {
+			currentCq := &kueue.ClusterQueue{}
+			g.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(managerCq), currentCq)).To(gomega.Succeed())
+			g.Expect(k8sManagerClient.Update(ctx, util.SetResourceNominalQuota(currentCq, corev1.ResourceCPU, value))).To(gomega.Succeed())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	}
+	ginkgo.By("Restricting manager quota to the head and one worker", func() {
+		setManagerCPUQuota("1500m")
+	})
+
+	raycluster := testingraycluster.MakeCluster("raycluster-sequential-scale-up", managerNs.Name).
+		Suspend(true).
+		SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+		Queue(managerLq.Name).
+		WithEnableAutoscaling(new(true)).
+		WithAutoscalerOptions(&rayv1.AutoscalerOptions{IdleTimeoutSeconds: ptr.To[int32](1)}).
+		FirstWorkerGroupReplicas(0, 0, 2).
+		RayStartParam(rayv1.HeadNode, "num-cpus", "0").
+		RayStartParam(rayv1.WorkerNode, "resources", fmt.Sprintf(`'{%q: 1}'`, workerResource)).
+		// The head and autoscaler request 1250m in total. That keeps the initial
+		// placement off worker2, whose ClusterQueue has only 1200m.
+		RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "750m").
+		RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "250m").
+		Image(rayv1.HeadNode, util.GetKuberayTestImage(), []string{}).
+		Image(rayv1.WorkerNode, util.GetKuberayTestImage(), []string{}).
+		Obj()
+
+	ginkgo.By("Creating the elastic RayCluster with zero initial workers", func() {
+		util.MustCreate(ctx, k8sManagerClient, raycluster)
+	})
+
+	gomega.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(raycluster), raycluster)).To(gomega.Succeed())
+	wlLookupKey := types.NamespacedName{
+		Name:      jobframework.GetWorkloadNameForOwnerWithGVKAndGeneration(raycluster.Name, raycluster.UID, rayv1.GroupVersion.WithKind("RayCluster"), raycluster.GetGeneration()),
+		Namespace: managerNs.Name,
+	}
+	admittedWorkerName := util.ExpectWorkloadsToBeAdmittedAndGetWorkerName(ctx, k8sManagerClient, wlLookupKey, multiKueueAc.Name)
+	admittedWorker := kubernetesClients[admittedWorkerName]
+	workerClient := admittedWorker.client
+
+	var headPod *corev1.Pod
+	ginkgo.By("Waiting for the RayCluster head to become ready on the worker", func() {
+		gomega.Eventually(func(g gomega.Gomega) {
+			workerRayCluster := &rayv1.RayCluster{}
+			g.Expect(workerClient.Get(ctx, client.ObjectKeyFromObject(raycluster), workerRayCluster)).To(gomega.Succeed())
+			g.Expect(apimeta.IsStatusConditionTrue(workerRayCluster.Status.Conditions, string(rayv1.HeadPodReady))).To(gomega.BeTrue())
+
+			pod, err := util.GetRayClusterHeadPod(ctx, workerClient, client.ObjectKeyFromObject(raycluster))
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(pod.Status.Phase).To(gomega.Equal(corev1.PodRunning))
+			headPod = pod
+		}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	runOnHead := func(script string) {
+		gomega.Eventually(func(g gomega.Gomega) {
+			_, stderr, err := util.KExecute(
+				ctx,
+				admittedWorker.cfg,
+				admittedWorker.restClient,
+				managerNs.Name,
+				headPod.Name,
+				headPod.Spec.Containers[0].Name,
+				[]string{"python", "-c", script},
+			)
+			g.Expect(err).NotTo(gomega.HaveOccurred(), string(stderr))
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	}
+
+	initialSlice := liveRayWorkloadSlice(gomega.Default, k8sManagerClient, managerNs.Name, wlLookupKey.Name)
+	ginkgo.By("Creating the first actor so the autoscaler scales from zero to one worker", func() {
+		runOnHead(createDetachedActorScript(actorA, workerResource))
+	})
+
+	var firstScaleUpSlice *kueue.Workload
+	ginkgo.By("Checking the first scale-up is admitted and exactly one worker runs", func() {
+		gomega.Eventually(func(g gomega.Gomega) {
+			workerPods, err := util.GetRayClusterWorkerPods(ctx, workerClient, client.ObjectKeyFromObject(raycluster), corev1.PodRunning)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(workerPods).To(gomega.HaveLen(1))
+
+			firstScaleUpSlice = replacementRayWorkloadSlice(g, k8sManagerClient, initialSlice)
+			g.Expect(podset.FindPodSetByName(firstScaleUpSlice.Spec.PodSets, "workers-group-0").Count).To(gomega.Equal(int32(1)))
+			g.Expect(workload.IsAdmitted(firstScaleUpSlice)).To(gomega.BeTrue())
+		}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	ginkgo.By("Creating the second actor so the autoscaler requests a second worker", func() {
+		runOnHead(createDetachedActorScript(actorB, workerResource))
+	})
+
+	var secondScaleUpSlice *kueue.Workload
+	ginkgo.By("Checking the second worker stays gated while its replacement slice is pending", func() {
+		gomega.Eventually(func(g gomega.Gomega) {
+			allWorkerPods, err := util.GetRayClusterWorkerPods(ctx, workerClient, client.ObjectKeyFromObject(raycluster), "")
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(allWorkerPods).To(gomega.HaveLen(2))
+			g.Expect(allWorkerPods).To(gomega.ContainElement(gomega.WithTransform(
+				func(p corev1.Pod) bool { return utilpod.HasGate(&p, kueue.ElasticJobSchedulingGate) },
+				gomega.BeTrue(),
+			)))
+
+			runningWorkerPods, err := util.GetRayClusterWorkerPods(ctx, workerClient, client.ObjectKeyFromObject(raycluster), corev1.PodRunning)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(runningWorkerPods).To(gomega.HaveLen(1))
+
+			secondScaleUpSlice = replacementRayWorkloadSlice(g, k8sManagerClient, firstScaleUpSlice)
+			g.Expect(podset.FindPodSetByName(secondScaleUpSlice.Spec.PodSets, "workers-group-0").Count).To(gomega.Equal(int32(2)))
+			g.Expect(workload.IsAdmitted(secondScaleUpSlice)).To(gomega.BeFalse())
+		}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	ginkgo.By("Restoring manager quota so the second scale-up can be admitted", func() {
+		setManagerCPUQuota("2")
+	})
+
+	ginkgo.By("Checking the second slice is admitted before both workers run", func() {
+		gomega.Eventually(func(g gomega.Gomega) {
+			updatedSlice := &kueue.Workload{}
+			g.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(secondScaleUpSlice), updatedSlice)).To(gomega.Succeed())
+			g.Expect(workload.IsAdmitted(updatedSlice)).To(gomega.BeTrue())
+
+			workerPods, err := util.GetRayClusterWorkerPods(ctx, workerClient, client.ObjectKeyFromObject(raycluster), corev1.PodRunning)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(workerPods).To(gomega.HaveLen(2))
+		}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
 	})
 }
 
