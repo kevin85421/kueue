@@ -38,7 +38,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	jobset "sigs.k8s.io/jobset/api/jobset/v1alpha2"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -126,8 +125,9 @@ var frameworkRules = map[string][]rbacv1.PolicyRule{
 }
 
 // MultiKueueRulesForManager returns RBAC rules matching the integrations
-// enabled in the Kueue manager configuration. Workload rules are always included.
-func MultiKueueRulesForManager(ctx context.Context, k8sClient client.Client) []rbacv1.PolicyRule {
+// enabled in the Kueue manager configuration and any additional frameworks.
+// Workload rules are always included.
+func MultiKueueRulesForManager(ctx context.Context, k8sClient client.Client, additionalFrameworks ...string) []rbacv1.PolicyRule {
 	cfg := GetKueueConfiguration(ctx, k8sClient)
 
 	rules := []rbacv1.PolicyRule{
@@ -137,7 +137,14 @@ func MultiKueueRulesForManager(ctx context.Context, k8sClient client.Client) []r
 		PolicyRule(kueue.SchemeGroupVersion.Group, "localqueues", "get", "list", "watch"),
 	}
 
-	for _, framework := range cfg.Integrations.Frameworks {
+	frameworks := append([]string(nil), cfg.Integrations.Frameworks...)
+	frameworks = append(frameworks, additionalFrameworks...)
+	seenFrameworks := make(map[string]struct{}, len(frameworks))
+	for _, framework := range frameworks {
+		if _, seen := seenFrameworks[framework]; seen {
+			continue
+		}
+		seenFrameworks[framework] = struct{}{}
 		if r, ok := frameworkRules[framework]; ok {
 			rules = append(rules, r...)
 		}
@@ -194,7 +201,7 @@ func KubeconfigForMultiKueueSA(ctx context.Context, c client.Client, restConfig 
 		Spec: authenticationv1.TokenRequestSpec{
 			// The 7d expiration duration matches the max expiration time value for this token
 			// and is configured in [hack/testing/multikueue/worker-cluster.kind.yaml].
-			ExpirationSeconds: ptr.To[int64](7 * 24 * 3600),
+			ExpirationSeconds: new(int64(7 * 24 * 3600)),
 		},
 	}
 	err = c.SubResource("token").Create(ctx, sa, token)

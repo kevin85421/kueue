@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,16 +50,18 @@ const (
 	FrameworkName          = "ray.io/rayjob"
 )
 
-func init() {
-	utilruntime.Must(jobframework.RegisterIntegration(FrameworkName, jobframework.IntegrationCallbacks{
-		SetupIndexes:      SetupIndexes,
-		NewJob:            newJob,
-		NewReconciler:     NewReconciler,
-		SetupWebhook:      SetupRayJobWebhook,
-		JobType:           &rayv1.RayJob{},
-		AddToScheme:       rayv1.AddToScheme,
-		MultiKueueAdapter: ray.NewMKAdapter(copyJobSpec, copyJobStatus, getEmptyList, gvk, getManagedBy, setManagedBy),
-	}))
+func RegisterIntegration(m *jobframework.IntegrationManager) error {
+	return m.RegisterIntegration(FrameworkName, jobframework.IntegrationCallbacks{
+		SetupIndexes:  SetupIndexes,
+		NewJob:        newJob,
+		NewReconciler: NewReconciler,
+		SetupWebhook:  SetupRayJobWebhook,
+		JobType:       &rayv1.RayJob{},
+		AddToScheme:   rayv1.AddToScheme,
+		MultiKueueAdapter: ray.NewMKAdapter(copyJobSpec, copyJobStatus, getEmptyList, gvk, getManagedBy, setManagedBy,
+			ray.WithElasticReplicaSync(elasticRuntimeSync()),
+		),
+	})
 }
 
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;watch;update;patch
@@ -213,7 +214,10 @@ func (j *RayJob) RestorePodSetsInfo(ctx context.Context, podSetsInfo []podset.Po
 		changed = podset.RestorePodSpec(&submitterPod.ObjectMeta, &submitterPod.Spec, info) || changed
 	}
 
-	return changed
+	return raycluster.ClearRuntimeWorkerStateAnnotations(j.Object()) || changed
+}
+func (j *RayJob) IsOnHold() bool {
+	return j.Status.JobDeploymentStatus == rayv1.JobDeploymentStatusValidationFailed
 }
 
 func (j *RayJob) Finished(ctx context.Context) (message string, success, finished bool) {
@@ -227,8 +231,8 @@ func (j *RayJob) PodsReady(ctx context.Context, _ client.Client) bool {
 	return j.Status.RayClusterStatus.State == rayv1.Ready
 }
 
-func (j *RayJob) GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error) {
-	return raycluster.GetWorkloadslicingRayClusterCustomAnnotations(ctx, c, j.Object(), podSets, j.Status.RayClusterName)
+func (j *RayJob) GetCustomAnnotations(ctx context.Context, c client.Client) (map[string]string, error) {
+	return raycluster.GetWorkloadslicingRayClusterCustomAnnotations(ctx, c, j.Object(), j.Status.RayClusterName)
 }
 
 func (j *RayJob) GetWorkloadNameExtraPart() string {

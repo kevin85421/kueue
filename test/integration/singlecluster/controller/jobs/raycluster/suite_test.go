@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/elasticjobs"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	jobcontrollers "sigs.k8s.io/kueue/pkg/controller/jobs"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/raycluster"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/rayjob"
 	"sigs.k8s.io/kueue/pkg/features"
@@ -70,6 +71,8 @@ var _ = ginkgo.AfterSuite(func() {
 
 func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 	return func(ctx context.Context, mgr manager.Manager) {
+		integrationManager := jobcontrollers.NewIntegrationManager()
+		opts = append(opts, jobframework.WithIntegrationManager(integrationManager))
 		reconciler, err := raycluster.NewReconciler(
 			ctx,
 			mgr.GetClient(),
@@ -89,7 +92,7 @@ func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		failedWebhook, err := webhooks.Setup(mgr, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
-		jobframework.EnableIntegration(rayjob.FrameworkName)
+		integrationManager.EnableIntegration(rayjob.FrameworkName)
 	}
 }
 
@@ -126,7 +129,7 @@ func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		if features.Enabled(features.ElasticJobsViaWorkloadSlices) {
-			failedCtrl, err := elasticjobs.SetupWithManager(mgr, &config.Configuration{}, nil)
+			failedCtrl, err := elasticjobs.SetupWithManager(mgr, &config.Configuration{}, nil, nil)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 		}
 
