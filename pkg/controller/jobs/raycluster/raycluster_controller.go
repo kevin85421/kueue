@@ -136,7 +136,8 @@ func (j *RayCluster) RunWithPodSetsInfo(ctx context.Context, _ client.Client, po
 }
 
 func (j *RayCluster) RestorePodSetsInfo(ctx context.Context, podSetsInfo []podset.PodSetInfo) bool {
-	return RestorePodSetsInfo(ctx, &j.Spec, podSetsInfo)
+	changed := RestorePodSetsInfo(ctx, &j.Spec, podSetsInfo)
+	return ClearRuntimeWorkerStateAnnotations(j.Object()) || changed
 }
 
 func (j *RayCluster) Finished(ctx context.Context) (message string, success, finished bool) {

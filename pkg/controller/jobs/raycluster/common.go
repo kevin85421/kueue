@@ -550,6 +550,24 @@ func SetRuntimeWorkerStateAnnotations(obj client.Object, result ray.FetchResult)
 	return true
 }
 
+// ClearRuntimeWorkerStateAnnotations removes the worker runtime state reflected
+// on the manager object after preemption so that a subsequent admission starts
+// from the spec instead of stale runtime state.
+func ClearRuntimeWorkerStateAnnotations(obj client.Object) bool {
+	annotations := obj.GetAnnotations()
+	changed := false
+	for _, key := range []string{RayClusterPodsetReplicaSizesAnnotation, RayClusterGenerationAnnotation} {
+		if _, found := annotations[key]; found {
+			delete(annotations, key)
+			changed = true
+		}
+	}
+	if changed {
+		obj.SetAnnotations(annotations)
+	}
+	return changed
+}
+
 // serializeWorkerGroupCounts serializes per-group counts into the JSON format of
 // the replica-sizes annotations, sorted by name for a deterministic value.
 func serializeWorkerGroupCounts(counts map[kueue.PodSetReference]int32) (string, error) {

@@ -214,7 +214,7 @@ func (j *RayJob) RestorePodSetsInfo(ctx context.Context, podSetsInfo []podset.Po
 		changed = podset.RestorePodSpec(&submitterPod.ObjectMeta, &submitterPod.Spec, info) || changed
 	}
 
-	return changed
+	return raycluster.ClearRuntimeWorkerStateAnnotations(j.Object()) || changed
 }
 func (j *RayJob) IsOnHold() bool {
 	return j.Status.JobDeploymentStatus == rayv1.JobDeploymentStatusValidationFailed
