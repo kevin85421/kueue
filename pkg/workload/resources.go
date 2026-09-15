@@ -146,10 +146,15 @@ func AdjustResources(ctx context.Context, cl client.Client, wl *kueue.Workload) 
 	for _, err := range handlePodOverhead(ctx, cl, wl) {
 		log.Error(err, "Failures adjusting requests for pod overhead")
 	}
+	// Copy limits into missing requests before applying the LimitRange
+	// defaults, mirroring the API server, where requests default from limits
+	// at object defaulting, before the LimitRanger admission plugin runs.
+	// The Pods created after admission request their limits, so the Workload
+	// must be accounted the same way.
+	handleLimitsToRequests(wl)
 	if err := handlePodLimitRange(ctx, cl, wl); err != nil {
 		log.Error(err, "Failed adjusting requests for LimitRanges")
 	}
-	handleLimitsToRequests(wl)
 }
 
 // ValidateResources validates that requested resources are less or equal
@@ -162,7 +167,7 @@ func ValidateResources(wi *Info) field.ErrorList {
 		podSpecPath := PodSetsPath.Index(i).Child("template").Child("spec")
 		for i := range ps.Template.Spec.InitContainers {
 			c := ps.Template.Spec.InitContainers[i]
-			if resNames := resources.NewMapRequests(c.Resources.Requests).GreaterKeys(resources.NewMapRequests(c.Resources.Limits)); len(resNames) > 0 {
+			if resNames := resources.NewRequestsFromResourceList(c.Resources.Requests).GreaterKeysRL(c.Resources.Limits); len(resNames) > 0 {
 				allErrors = append(
 					allErrors,
 					field.Invalid(podSpecPath.Child("initContainers").Index(i), resNames, RequestsMustNotExceedLimitMessage),
@@ -172,7 +177,7 @@ func ValidateResources(wi *Info) field.ErrorList {
 
 		for i := range ps.Template.Spec.Containers {
 			c := ps.Template.Spec.Containers[i]
-			if resNames := resources.NewMapRequests(c.Resources.Requests).GreaterKeys(resources.NewMapRequests(c.Resources.Limits)); len(resNames) > 0 {
+			if resNames := resources.NewRequestsFromResourceList(c.Resources.Requests).GreaterKeysRL(c.Resources.Limits); len(resNames) > 0 {
 				allErrors = append(
 					allErrors,
 					field.Invalid(podSpecPath.Child("containers").Index(i), resNames, RequestsMustNotExceedLimitMessage),
@@ -183,7 +188,7 @@ func ValidateResources(wi *Info) field.ErrorList {
 		// Pod-level resources (KEP-2837) are an optional pointer, only set when the
 		// PodLevelResources feature is enabled and used.
 		if podResources := ps.Template.Spec.Resources; podResources != nil {
-			if resNames := resources.NewMapRequests(podResources.Requests).GreaterKeys(resources.NewMapRequests(podResources.Limits)); len(resNames) > 0 {
+			if resNames := resources.NewRequestsFromResourceList(podResources.Requests).GreaterKeysRL(podResources.Limits); len(resNames) > 0 {
 				allErrors = append(
 					allErrors,
 					field.Invalid(podSpecPath.Child("resources"), resNames, RequestsMustNotExceedLimitMessage),
@@ -216,7 +221,8 @@ func ValidateLimitRange(ctx context.Context, c client.Client, wi *Info) field.Er
 	return allErrs
 }
 
-func hasInternalError(errs field.ErrorList) bool {
+// HasInternalError reports whether the field error list contains an internal error.
+func HasInternalError(errs field.ErrorList) bool {
 	for _, e := range errs {
 		if e.Type == field.ErrorTypeInternal {
 			return true
@@ -250,7 +256,7 @@ func ValidateAdmissibility(
 	}
 
 	if errs := ValidateLimitRange(ctx, c, wi); len(errs) > 0 {
-		if hasInternalError(errs) {
+		if HasInternalError(errs) {
 			return fmt.Errorf("%w: %w", ErrInternal, errs.ToAggregate())
 		}
 		return fmt.Errorf("%s: %w", ErrLimitRangeConstraintsUnsatisfiedResources, errs.ToAggregate())
