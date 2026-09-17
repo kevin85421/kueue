@@ -476,7 +476,7 @@ func TestCacheClusterQueueOperations(t *testing.T) {
 							TotalRequests: []workload.PodSetResources{
 								{
 									Name:     kueue.DefaultPodSetName,
-									Requests: resources.NewRequestsFromMap(resources.MapRequests{corev1.ResourceCPU: 5000}),
+									Requests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 5000}),
 									Count:    1,
 									Flavors:  map[corev1.ResourceName]kueue.ResourceFlavorReference{corev1.ResourceCPU: "default"},
 								},
@@ -920,7 +920,7 @@ func TestCacheClusterQueueOperations(t *testing.T) {
 							TotalRequests: []workload.PodSetResources{
 								{
 									Name:     kueue.DefaultPodSetName,
-									Requests: resources.NewRequestsFromMap(resources.MapRequests{corev1.ResourceCPU: 1000}),
+									Requests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000}),
 									Count:    1,
 									Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
 										corev1.ResourceCPU: "f1",
@@ -933,7 +933,7 @@ func TestCacheClusterQueueOperations(t *testing.T) {
 							TotalRequests: []workload.PodSetResources{
 								{
 									Name:     kueue.DefaultPodSetName,
-									Requests: resources.NewRequestsFromMap(resources.MapRequests{corev1.ResourceCPU: 1000}),
+									Requests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000}),
 									Count:    1,
 									Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
 										corev1.ResourceCPU: "f1",
@@ -1066,7 +1066,7 @@ func TestCacheClusterQueueOperations(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantClusterQueues, cache.hm.ClusterQueues(),
 				cmpopts.IgnoreFields(clusterQueue{}, "ResourceGroups"),
-				cmpopts.IgnoreFields(workload.Info{}, "Obj", "LastAssignment", "SchedulingHash"),
+				cmpopts.IgnoreFields(workload.Info{}, "Obj", "FlavorScanState", "SchedulingHash"),
 				cmpopts.IgnoreUnexported(clusterQueue{}, hierarchy.ClusterQueue[*cohort]{}),
 				cmp.Comparer(resources.Equal),
 				cmpopts.EquateEmpty()); diff != "" {
@@ -2713,6 +2713,83 @@ func TestClusterQueuesUsingFlavor(t *testing.T) {
 	}
 }
 
+func TestClusterQueuesForResources(t *testing.T) {
+	defaultRf := utiltestingapi.MakeResourceFlavor("default").Obj()
+	gpuCq := utiltestingapi.MakeClusterQueue("gpu-cq").
+		ResourceGroup(
+			*utiltestingapi.MakeFlavorQuotas("default").Resource("gpu.nvidia.com/mig-1g.10gb", "10").Obj()).
+		Obj()
+	cpuCq := utiltestingapi.MakeClusterQueue("cpu-cq").
+		ResourceGroup(
+			*utiltestingapi.MakeFlavorQuotas("default").Resource("cpu", "100").Obj()).
+		Obj()
+	multiCq := utiltestingapi.MakeClusterQueue("multi-cq").
+		ResourceGroup(
+			*utiltestingapi.MakeFlavorQuotas("default").Resource("cpu", "50").Resource("gpu.nvidia.com/mig-1g.10gb", "5").Obj()).
+		Obj()
+	emptyCq := utiltestingapi.MakeClusterQueue("empty-cq").Obj()
+
+	tests := []struct {
+		name          string
+		clusterQueues []*kueue.ClusterQueue
+		resourceNames []corev1.ResourceName
+		wantCQNames   []kueue.ClusterQueueReference
+	}{
+		{
+			name:          "matches CQ covering the resource",
+			clusterQueues: []*kueue.ClusterQueue{gpuCq, cpuCq},
+			resourceNames: []corev1.ResourceName{"gpu.nvidia.com/mig-1g.10gb"},
+			wantCQNames:   []kueue.ClusterQueueReference{"gpu-cq"},
+		},
+		{
+			name:          "no match returns empty",
+			clusterQueues: []*kueue.ClusterQueue{cpuCq},
+			resourceNames: []corev1.ResourceName{"gpu.nvidia.com/mig-1g.10gb"},
+		},
+		{
+			name:          "matches multiple CQs covering the resource",
+			clusterQueues: []*kueue.ClusterQueue{gpuCq, cpuCq, multiCq},
+			resourceNames: []corev1.ResourceName{"gpu.nvidia.com/mig-1g.10gb"},
+			wantCQNames:   []kueue.ClusterQueueReference{"gpu-cq", "multi-cq"},
+		},
+		{
+			name:          "matches on any of the requested resources",
+			clusterQueues: []*kueue.ClusterQueue{gpuCq, cpuCq},
+			resourceNames: []corev1.ResourceName{"gpu.nvidia.com/mig-1g.10gb", "cpu"},
+			wantCQNames:   []kueue.ClusterQueueReference{"gpu-cq", "cpu-cq"},
+		},
+		{
+			name:          "empty resource names returns empty",
+			clusterQueues: []*kueue.ClusterQueue{gpuCq},
+			resourceNames: []corev1.ResourceName{},
+		},
+		{
+			name:          "CQ with no resource groups is not matched",
+			clusterQueues: []*kueue.ClusterQueue{emptyCq},
+			resourceNames: []corev1.ResourceName{"cpu"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, log := utiltesting.ContextWithLog(t)
+			cache := New(utiltesting.NewFakeClient())
+			cache.AddOrUpdateResourceFlavor(log, defaultRf)
+
+			for _, cq := range tc.clusterQueues {
+				if err := cache.AddClusterQueue(ctx, cq); err != nil {
+					t.Fatalf("failed to add clusterQueue %s: %v", cq.Name, err)
+				}
+			}
+
+			got := cache.ClusterQueuesForResources(sets.New(tc.resourceNames...))
+			wantCQs := sets.New(tc.wantCQNames...)
+			if diff := cmp.Diff(wantCQs, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("ClusterQueuesForResources mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestMatchingClusterQueues(t *testing.T) {
 	clusterQueues := []*kueue.ClusterQueue{
 		utiltestingapi.MakeClusterQueue("matching1").
@@ -2743,6 +2820,97 @@ func TestMatchingClusterQueues(t *testing.T) {
 	gotCQs := cache.MatchingClusterQueues(map[string]string{"dep": "eng"})
 	if diff := cmp.Diff(wantCQs, gotCQs); diff != "" {
 		t.Errorf("Wrong ClusterQueues (-want,+got):\n%s", diff)
+	}
+}
+
+// TestMatchingClusterQueuesAfterUpdate covers ClusterQueues that remain in the
+// hierarchy manager after an update error or while their Cohort is cyclic.
+func TestMatchingClusterQueuesAfterUpdate(t *testing.T) {
+	teamSelector := func(team string) *metav1.LabelSelector {
+		return &metav1.LabelSelector{MatchLabels: map[string]string{"team": team}}
+	}
+	addCohortCycle := func(t *testing.T, cache *Cache) {
+		t.Helper()
+		if err := cache.AddOrUpdateCohort(utiltestingapi.MakeCohort("cycle-a").Parent("cycle-b").Obj()); err != nil {
+			t.Fatal(err)
+		}
+		if err := cache.AddOrUpdateCohort(utiltestingapi.MakeCohort("cycle-b").Parent("cycle-a").Obj()); err == nil {
+			t.Fatal("Expected failure when cycle")
+		}
+	}
+
+	cases := map[string]struct {
+		setup       func(*testing.T, *Cache)
+		wantMatch   []map[string]string
+		wantNoMatch []map[string]string
+	}{
+		"add into cyclic cohort applies the configured selector": {
+			setup: func(t *testing.T, cache *Cache) {
+				ctx, _ := utiltesting.ContextWithLog(t)
+				addCohortCycle(t, cache)
+				cq := utiltestingapi.MakeClusterQueue("cq").
+					Cohort("cycle-a").
+					NamespaceSelector(teamSelector("eng")).
+					Obj()
+				if err := cache.AddClusterQueue(ctx, cq); err != nil {
+					t.Fatalf("Adding ClusterQueue to cyclic Cohort: %v", err)
+				}
+			},
+			wantMatch:   []map[string]string{{"team": "eng"}},
+			wantNoMatch: []map[string]string{{"team": "ops"}},
+		},
+		"update into cyclic cohort applies the new selector": {
+			setup: func(t *testing.T, cache *Cache) {
+				ctx, log := utiltesting.ContextWithLog(t)
+				cq := utiltestingapi.MakeClusterQueue("cq").
+					NamespaceSelector(teamSelector("eng")).
+					Obj()
+				if err := cache.AddClusterQueue(ctx, cq); err != nil {
+					t.Fatal(err)
+				}
+				addCohortCycle(t, cache)
+				updated := utiltestingapi.MakeClusterQueue("cq").
+					Cohort("cycle-a").
+					NamespaceSelector(teamSelector("ops")).
+					Obj()
+				if err := cache.UpdateClusterQueue(log, updated); err != nil {
+					t.Fatalf("Updating ClusterQueue into cyclic Cohort: %v", err)
+				}
+			},
+			wantMatch:   []map[string]string{{"team": "ops"}},
+			wantNoMatch: []map[string]string{{"team": "eng"}},
+		},
+		"add with an unparsable selector matches no Namespace": {
+			setup: func(t *testing.T, cache *Cache) {
+				ctx, _ := utiltesting.ContextWithLog(t)
+				cq := utiltestingapi.MakeClusterQueue("cq").
+					NamespaceSelector(teamSelector("not a valid label value")).
+					Obj()
+				if err := cache.AddClusterQueue(ctx, cq); err == nil {
+					t.Fatal("Expected failure when adding cq with an unparsable selector")
+				}
+			},
+			wantNoMatch: []map[string]string{nil, {"team": "eng"}},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cache := New(utiltesting.NewFakeClient())
+			tc.setup(t, cache)
+
+			for _, nsLabels := range tc.wantMatch {
+				want := sets.New[kueue.ClusterQueueReference]("cq")
+				if diff := cmp.Diff(want, cache.MatchingClusterQueues(nsLabels)); diff != "" {
+					t.Errorf("MatchingClusterQueues(%v) returned unexpected ClusterQueues (-want,+got):\n%s", nsLabels, diff)
+				}
+			}
+			for _, nsLabels := range tc.wantNoMatch {
+				want := sets.New[kueue.ClusterQueueReference]()
+				if diff := cmp.Diff(want, cache.MatchingClusterQueues(nsLabels)); diff != "" {
+					t.Errorf("MatchingClusterQueues(%v) returned unexpected ClusterQueues (-want,+got):\n%s", nsLabels, diff)
+				}
+			}
+		})
 	}
 }
 
@@ -3298,9 +3466,9 @@ func TestCohortCycles(t *testing.T) {
 			t.Fatal("Expected failure when cycle")
 		}
 	})
-	t.Run("clusterqueue add and update return error when cohort has cycle", func(t *testing.T) {
+	t.Run("clusterqueue becomes inactive until cohort cycle is resolved", func(t *testing.T) {
 		cache := New(utiltesting.NewFakeClient())
-		ctx, log := utiltesting.ContextWithLog(t)
+		ctx, _ := utiltesting.ContextWithLog(t)
 		cohortA := utiltestingapi.MakeCohort("cohort-a").Parent("cohort-b").Obj()
 		if err := cache.AddOrUpdateCohort(cohortA); err != nil {
 			t.Fatal("Expected success as no cycle yet")
@@ -3314,25 +3482,19 @@ func TestCohortCycles(t *testing.T) {
 			t.Fatal("Expected failure when cycle")
 		}
 
-		// Error when creating CQ with parent Cohort-A
 		cq := utiltestingapi.MakeClusterQueue("cq").Cohort("cohort-a").Obj()
-		if err := cache.AddClusterQueue(ctx, cq); err == nil {
-			t.Fatal("Expected failure when adding cq to cohort with cycle")
+		if err := cache.AddClusterQueue(ctx, cq); err != nil {
+			t.Fatalf("Adding ClusterQueue to cyclic Cohort: %v", err)
+		}
+		gotStatus, gotReason, _ := cache.ClusterQueueReadiness("cq")
+		if gotStatus != metav1.ConditionFalse || gotReason != kueue.ClusterQueueActiveReasonCohortCycleDetected {
+			t.Fatalf("ClusterQueue readiness during cycle = (%s, %q), want (%s, %q)", gotStatus, gotReason, metav1.ConditionFalse, kueue.ClusterQueueActiveReasonCohortCycleDetected)
 		}
 
-		// Error when updating CQ with parent Cohort-B
-		cq = utiltestingapi.MakeClusterQueue("cq").Cohort("cohort-b").Obj()
-		if err := cache.UpdateClusterQueue(log, cq); err == nil {
-			t.Fatal("Expected failure when updating cq to cohort with cycle")
-		}
-
-		// Delete Cohort C, breaking cycle
 		cache.DeleteCohort("cohort-c")
-
-		// Update succeeds
-		cq = utiltestingapi.MakeClusterQueue("cq").Cohort("cohort-b").Obj()
-		if err := cache.UpdateClusterQueue(log, cq); err != nil {
-			t.Fatal("Expected success")
+		gotStatus, gotReason, _ = cache.ClusterQueueReadiness("cq")
+		if gotStatus != metav1.ConditionTrue || gotReason != kueue.ClusterQueueActiveReasonReady {
+			t.Errorf("ClusterQueue readiness after cycle resolution = (%s, %q), want (%s, %q)", gotStatus, gotReason, metav1.ConditionTrue, kueue.ClusterQueueActiveReasonReady)
 		}
 	})
 
@@ -3352,13 +3514,12 @@ func TestCohortCycles(t *testing.T) {
 			t.Fatal("Expected success")
 		}
 
-		// Error when creating cq with parent that has cycle
 		cq := utiltestingapi.MakeClusterQueue("cq").
 			ResourceGroup(
 				*utiltestingapi.MakeFlavorQuotas("arm").Resource(corev1.ResourceCPU, "5").Obj(),
 			).Cohort("cycle").Obj()
-		if err := cache.AddClusterQueue(ctx, cq); err == nil {
-			t.Fatal("Expected failure")
+		if err := cache.AddClusterQueue(ctx, cq); err != nil {
+			t.Fatalf("Adding ClusterQueue to cyclic Cohort: %v", err)
 		}
 
 		// Successfully updated to cohort without cycle
@@ -3420,8 +3581,8 @@ func TestCohortCycles(t *testing.T) {
 
 		// Updated to cycle
 		cq.Spec.CohortName = "cycle"
-		if err := cache.UpdateClusterQueue(log, cq); err == nil {
-			t.Fatal("Expected failure")
+		if err := cache.UpdateClusterQueue(log, cq); err != nil {
+			t.Fatalf("Updating ClusterQueue into cyclic Cohort: %v", err)
 		}
 
 		// Cohort's SubtreeQuota no longer contains resources from CQ.
@@ -3608,6 +3769,57 @@ func TestCohortCycles(t *testing.T) {
 		// Must not panic with a goroutine stack overflow.
 		cache.ResyncGaugeMetrics(log)
 	})
+}
+
+func TestCohortCycleRequiredGuards(t *testing.T) {
+	ctx, log := utiltesting.ContextWithLog(t)
+	cache := New(utiltesting.NewFakeClient(), WithFairSharing(true), WithResourceMetrics(true))
+	cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
+
+	for _, cohort := range []*kueue.Cohort{
+		utiltestingapi.MakeCohort("root").
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "10").Obj()).
+			Obj(),
+		utiltestingapi.MakeCohort("parent").Parent("root").Obj(),
+		utiltestingapi.MakeCohort("child").Parent("parent").Obj(),
+	} {
+		if err := cache.AddOrUpdateCohort(cohort); err != nil {
+			t.Fatalf("Adding Cohort %q: %v", cohort.Name, err)
+		}
+	}
+
+	cq := utiltestingapi.MakeClusterQueue("cq").
+		Cohort("parent").
+		ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "0").Obj()).
+		Obj()
+	if err := cache.AddClusterQueue(ctx, cq); err != nil {
+		t.Fatalf("Adding ClusterQueue: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	wl := utiltestingapi.MakeWorkload("wl", "default").
+		Request(corev1.ResourceCPU, "1").
+		ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").
+			PodSets(utiltestingapi.MakePodSetAssignment(kueue.DefaultPodSetName).
+				Assignment(corev1.ResourceCPU, "default", "1").
+				Obj()).
+			Obj(), now).
+		Obj()
+	if added := cache.AddOrUpdateWorkload(log, wl); !added {
+		t.Fatal("Workload was not added")
+	}
+
+	if err := cache.AddOrUpdateCohort(utiltestingapi.MakeCohort("parent").Parent("child").Obj()); !errors.Is(err, ErrCohortHasCycle) {
+		t.Fatalf("Creating Cohort cycle: got error %v, want %v", err, ErrCohortHasCycle)
+	}
+
+	if updated := cache.AddOrUpdateWorkload(log, wl.DeepCopy()); !updated {
+		t.Fatal("Workload was not updated during cycle")
+	}
+	if _, err := cache.Usage(cq); err != nil {
+		t.Fatalf("Getting ClusterQueue usage during cycle: %v", err)
+	}
+	cache.ResyncClusterQueueGaugeMetrics("cq")
 }
 
 func TestDeleteCohortUpdatesAncestorSubtreeQuota(t *testing.T) {

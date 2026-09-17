@@ -47,6 +47,7 @@ var (
 )
 
 type RayClusterWebhook struct {
+	integrationManager           *jobframework.IntegrationManager
 	client                       client.Client
 	queues                       *qcache.Manager
 	manageJobsWithoutQueueName   bool
@@ -61,6 +62,7 @@ func SetupRayClusterWebhook(mgr ctrl.Manager, opts ...jobframework.Option) error
 		opt(&options)
 	}
 	wh := &RayClusterWebhook{
+		integrationManager:           options.IntegrationManager,
 		client:                       mgr.GetClient(),
 		queues:                       options.Queues,
 		manageJobsWithoutQueueName:   options.ManageJobsWithoutQueueName,
@@ -87,11 +89,11 @@ func (w *RayClusterWebhook) Default(ctx context.Context, obj *rayv1.RayCluster) 
 	job := fromObject(obj)
 	log := ctrl.LoggerFrom(ctx).WithName("raycluster-webhook")
 	log.V(10).Info("Applying defaults")
-	if err := jobframework.ApplyDefaultLocalQueue(ctx, w.client, job.Object(), w.queues.DefaultLocalQueueExist, w.managedJobsNamespaceSelector); err != nil {
+	if err := w.integrationManager.ApplyDefaultLocalQueue(ctx, w.client, job.Object(), w.queues.DefaultLocalQueueExist, w.managedJobsNamespaceSelector); err != nil {
 		return err
 	}
-	jobframework.ApplyDefaultWorkloadPriorityClass(ctx, w.client, job.Object())
-	if err := jobframework.ApplyDefaultForSuspend(ctx, job, w.client, w.manageJobsWithoutQueueName, w.managedJobsNamespaceSelector); err != nil {
+	w.integrationManager.ApplyDefaultWorkloadPriorityClass(ctx, w.client, job.Object())
+	if err := w.integrationManager.ApplyDefaultForSuspend(ctx, job, w.client, w.manageJobsWithoutQueueName, w.managedJobsNamespaceSelector); err != nil {
 		return err
 	}
 	jobframework.ApplyDefaultForManagedBy(job, w.queues, w.cache, log)
@@ -147,7 +149,9 @@ func (w *RayClusterWebhook) validateCreate(ctx context.Context, job *rayv1.RayCl
 				field.Invalid(
 					specPath.Child("enableInTreeAutoscaling"),
 					spec.EnableInTreeAutoscaling,
-					"a kueue managed job can use autoscaling only when the ElasticJobsViaWorkloadSlices feature gate is on and the job is an elastic job",
+					fmt.Sprintf("a kueue-managed RayCluster can use autoscaling only as an elastic job: "+
+						"enable the ElasticJobsViaWorkloadSlices feature gate and set the %q: %q annotation",
+						workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue),
 				),
 			)
 		}
@@ -212,6 +216,18 @@ func validateElasticJob(job *rayv1.RayCluster) field.ErrorList {
 		)
 	}
 
+	// MultiKueue does not support Ray autoscaling yet.
+	if ptr.Deref(job.Spec.EnableInTreeAutoscaling, false) &&
+		ptr.Deref(job.Spec.ManagedBy, "") == kueue.MultiKueueControllerName {
+		allErrors = append(
+			allErrors,
+			field.Forbidden(
+				specPath.Child("enableInTreeAutoscaling"),
+				"in-tree autoscaling is not supported for a MultiKueue-managed elastic RayCluster",
+			),
+		)
+	}
+
 	return allErrors
 }
 
@@ -246,18 +262,18 @@ func (w *RayClusterWebhook) validateTopologyRequest(ctx context.Context, rayJob 
 func (w *RayClusterWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj *rayv1.RayCluster) (admission.Warnings, error) {
 	oldJob := fromObject(oldObj)
 	newJob := fromObject(newObj)
-	log := ctrl.LoggerFrom(ctx).WithName("raycluster-webhook")
-	if w.manageJobsWithoutQueueName || jobframework.QueueName(newJob) != "" {
-		log.Info("Validating update")
-		allErrors := jobframework.ValidateJobOnUpdate(oldJob, newJob, w.queues.DefaultLocalQueueExist)
-		validationErrs, err := w.validateCreate(ctx, newObj)
-		if err != nil {
-			return nil, err
-		}
-		allErrors = append(allErrors, validationErrs...)
-		return nil, allErrors.ToAggregate()
+	if !jobframework.ShouldValidateRayOrSparkJobOnUpdate(oldJob, newJob, w.manageJobsWithoutQueueName) {
+		return nil, nil
 	}
-	return nil, nil
+	log := ctrl.LoggerFrom(ctx).WithName("raycluster-webhook")
+	log.V(5).Info("Validating update")
+	allErrors := jobframework.ValidateJobOnUpdate(oldJob, newJob, w.queues.DefaultLocalQueueExist)
+	validationErrs, err := w.validateCreate(ctx, newObj)
+	if err != nil {
+		return nil, err
+	}
+	allErrors = append(allErrors, validationErrs...)
+	return nil, allErrors.ToAggregate()
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type

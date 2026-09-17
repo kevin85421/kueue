@@ -146,10 +146,15 @@ func AdjustResources(ctx context.Context, cl client.Client, wl *kueue.Workload) 
 	for _, err := range handlePodOverhead(ctx, cl, wl) {
 		log.Error(err, "Failures adjusting requests for pod overhead")
 	}
+	// Copy limits into missing requests before applying the LimitRange
+	// defaults, mirroring the API server, where requests default from limits
+	// at object defaulting, before the LimitRanger admission plugin runs.
+	// The Pods created after admission request their limits, so the Workload
+	// must be accounted the same way.
+	handleLimitsToRequests(wl)
 	if err := handlePodLimitRange(ctx, cl, wl); err != nil {
 		log.Error(err, "Failed adjusting requests for LimitRanges")
 	}
-	handleLimitsToRequests(wl)
 }
 
 // ValidateResources validates that requested resources are less or equal
@@ -216,7 +221,8 @@ func ValidateLimitRange(ctx context.Context, c client.Client, wi *Info) field.Er
 	return allErrs
 }
 
-func hasInternalError(errs field.ErrorList) bool {
+// HasInternalError reports whether the field error list contains an internal error.
+func HasInternalError(errs field.ErrorList) bool {
 	for _, e := range errs {
 		if e.Type == field.ErrorTypeInternal {
 			return true
@@ -250,7 +256,7 @@ func ValidateAdmissibility(
 	}
 
 	if errs := ValidateLimitRange(ctx, c, wi); len(errs) > 0 {
-		if hasInternalError(errs) {
+		if HasInternalError(errs) {
 			return fmt.Errorf("%w: %w", ErrInternal, errs.ToAggregate())
 		}
 		return fmt.Errorf("%s: %w", ErrLimitRangeConstraintsUnsatisfiedResources, errs.ToAggregate())

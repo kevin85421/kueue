@@ -19,6 +19,7 @@ package resources
 import (
 	"cmp"
 	"hash/fnv"
+	"iter"
 	"math"
 	"slices"
 	"strings"
@@ -104,8 +105,8 @@ func ResourceListToSliceRequests(rl corev1.ResourceList) SliceRequests {
 	return sr
 }
 
-// ToMapRequests converts a SliceRequests back to a MapRequests map.
-func (sr *SliceRequests) ToMapRequests() MapRequests {
+// ToMap converts a SliceRequests back to a MapRequests map.
+func (sr *SliceRequests) ToMap() map[corev1.ResourceName]int64 {
 	if sr.IsEmpty() {
 		return nil
 	}
@@ -125,7 +126,7 @@ func (sr *SliceRequests) ForEach(fn func(name corev1.ResourceName, val int64)) {
 	}
 }
 
-func (sr *SliceRequests) GetValue(name corev1.ResourceName) int64 {
+func (sr *SliceRequests) ResourceValue(name corev1.ResourceName) int64 {
 	if sr == nil {
 		return 0
 	}
@@ -161,8 +162,7 @@ func (sr *SliceRequests) Clone() Requests {
 	if sr == nil {
 		return (*SliceRequests)(nil)
 	}
-	res := slices.Clone(*sr)
-	return &res
+	return new(slices.Clone(*sr))
 }
 
 func (sr *SliceRequests) ScaledUp(f int64) Requests {
@@ -221,7 +221,8 @@ func (sr *SliceRequests) ToResourceList(formatter *ResourceFormatter) corev1.Res
 	return ret
 }
 
-// GreaterKeys returns keys where the receiver is greater than other.
+// GreaterKeys returns keys where the receiver is greater than other,
+// sorted alphabetically for deterministic output.
 func (sr *SliceRequests) GreaterKeys(other Requests) []corev1.ResourceName {
 	if sr.IsEmpty() || isEmpty(other) {
 		return nil
@@ -237,6 +238,7 @@ func (sr *SliceRequests) GreaterKeys(other Requests) []corev1.ResourceName {
 			result = append(result, entry.name)
 		}
 	}
+	slices.Sort(result)
 	return result
 }
 
@@ -250,9 +252,7 @@ func (sr *SliceRequests) Add(other Requests) {
 	if isEmpty(other) || sr == nil {
 		return
 	}
-	sr.mergeWithInPlace(toSliceRequests(other), func(a, b int64) int64 {
-		return a + b
-	})
+	sr.mergeWithInPlace(toSliceRequests(other), utilmath.SaturatingAdd)
 }
 
 // Sub performs an element-wise subtraction.
@@ -260,9 +260,7 @@ func (sr *SliceRequests) Sub(other Requests) {
 	if isEmpty(other) || sr == nil {
 		return
 	}
-	sr.mergeWithInPlace(toSliceRequests(other), func(a, b int64) int64 {
-		return a - b
-	})
+	sr.mergeWithInPlace(toSliceRequests(other), utilmath.SaturatingSub)
 }
 
 // mergeFunc defines a computation lambda between matching or missing values in two SliceRequests.
@@ -368,7 +366,7 @@ func (sr *SliceRequests) CountInWithLimitingResource(capacity Requests) (int32, 
 				capVal = (*capSR)[j].value
 			}
 		} else if capacity != nil {
-			capVal = capacity.GetValue(entry.name)
+			capVal = capacity.ResourceValue(entry.name)
 		}
 
 		count := int32(math.MaxInt32)
@@ -394,5 +392,18 @@ func (sr *SliceRequests) FloorToZero() {
 	}
 	for i := range *sr {
 		(*sr)[i].value = max((*sr)[i].value, 0)
+	}
+}
+
+func (sr *SliceRequests) Iter() iter.Seq2[corev1.ResourceName, int64] {
+	return func(yield func(corev1.ResourceName, int64) bool) {
+		if sr == nil {
+			return
+		}
+		for _, req := range *sr {
+			if !yield(req.name, req.value) {
+				return
+			}
+		}
 	}
 }
