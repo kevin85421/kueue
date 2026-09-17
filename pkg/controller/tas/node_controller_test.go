@@ -29,10 +29,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-base/featuregate"
 	testingclock "k8s.io/utils/clock/testing"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -324,6 +324,43 @@ func TestNodeFailureReconciler(t *testing.T) {
 			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
 			wantUnhealthyNodes: []kueue.UnhealthyNode{{Name: nodeName}},
 		},
+		"Node NotReady, another workload's running pod does not prevent replacement": {
+			featureGates: map[featuregate.Feature]bool{
+				features.TASReplaceNodeOnPodTermination:           true,
+				features.TASReplaceNodeDueToNotReadyOverFixedTime: false,
+			},
+			initObjs: []client.Object{
+				baseNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: now}).Obj(),
+				baseWorkload.DeepCopy(),
+				failedPod.DeepCopy(),
+				testingpod.MakePod("other-workload-pod", nsName).
+					Annotation(kueue.WorkloadAnnotation, "other-workload").
+					NodeName(nodeName).StatusPhase(corev1.PodRunning).Obj(),
+			},
+			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
+			wantUnhealthyNodes: []kueue.UnhealthyNode{{Name: nodeName}},
+		},
+		"Node NotReady, an unmanaged running pod does not prevent replacement": {
+			featureGates: map[featuregate.Feature]bool{
+				features.TASReplaceNodeOnPodTermination:           true,
+				features.TASReplaceNodeDueToNotReadyOverFixedTime: false,
+			},
+			initObjs: []client.Object{
+				baseNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: now}).Obj(),
+				baseWorkload.DeepCopy(),
+				failedPod.DeepCopy(),
+				testingpod.MakePod("unmanaged-pod", nsName).
+					NodeName(nodeName).StatusPhase(corev1.PodRunning).Obj(),
+			},
+			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
+			wantUnhealthyNodes: []kueue.UnhealthyNode{{Name: nodeName}},
+		},
 		"Node NotReady, pod failed, marked as unavailable": {
 			initObjs: []client.Object{
 				baseNode.Clone().StatusConditions(corev1.NodeCondition{
@@ -508,7 +545,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 							Key:               "foo",
 							Effect:            corev1.TaintEffectNoExecute,
 							Operator:          corev1.TolerationOpExists,
-							TolerationSeconds: ptr.To[int64](300),
+							TolerationSeconds: new(int64(300)),
 						}).
 						Obj()).
 					ReserveQuotaAt(
@@ -544,7 +581,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 							Key:               "foo",
 							Effect:            corev1.TaintEffectNoExecute,
 							Operator:          corev1.TolerationOpExists,
-							TolerationSeconds: ptr.To[int64](300),
+							TolerationSeconds: new(int64(300)),
 						}).
 						Obj()).
 					ReserveQuotaAt(
@@ -648,7 +685,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 							Key:               "foo",
 							Effect:            corev1.TaintEffectNoExecute,
 							Operator:          corev1.TolerationOpExists,
-							TolerationSeconds: ptr.To[int64](300),
+							TolerationSeconds: new(int64(300)),
 						}).
 						Obj()).
 					ReserveQuotaAt(
@@ -688,7 +725,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 							Key:               "foo",
 							Effect:            corev1.TaintEffectNoExecute,
 							Operator:          corev1.TolerationOpExists,
-							TolerationSeconds: ptr.To[int64](300),
+							TolerationSeconds: new(int64(300)),
 						}).
 						Obj()).
 					ReserveQuotaAt(
@@ -1138,16 +1175,18 @@ func TestNodeFailureReconciler(t *testing.T) {
 				WithObjects(initObjs...).
 				WithStatusSubresource(tc.initObjs...).
 				WithInterceptorFuncs(interceptor.Funcs{
-					SubResourcePatch: func(ctx context.Context, client client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					SubResourceApply: func(ctx context.Context, client client.Client, subResource string, applyConf runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
 						if tc.injectPatchError && subResource == "status" {
-							if wl, ok := obj.(*kueue.Workload); ok && wl.Name == wlName {
+							wl := &kueue.Workload{}
+							if err := utiltesting.DecodeApplyConfiguration(applyConf, wl); err != nil {
+								return err
+							}
+							if wl.Name == wlName && !slices.Contains(wl.Status.UnhealthyNodes, kueue.UnhealthyNode{Name: nodeName}) {
 								// Fail only if it's trying to remove the node (it's not in the list anymore).
-								if !slices.Contains(wl.Status.UnhealthyNodes, kueue.UnhealthyNode{Name: nodeName}) {
-									return errors.New("injected patch error on removal")
-								}
+								return errors.New("injected patch error on removal")
 							}
 						}
-						return utiltesting.TreatSSAAsStrategicMerge(ctx, client, subResource, obj, patch, opts...)
+						return utiltesting.TreatSSAAsStrategicMergeForApplyConfiguration(ctx, client, subResource, applyConf, opts...)
 					},
 				})
 			ctx, _ := utiltesting.ContextWithLog(t)
@@ -1348,7 +1387,7 @@ func TestGetWorkloadStatus(t *testing.T) {
 			_ = cl.Get(ctx, wlKey, wl)
 
 			sliceName := workloadslicing.SliceName(wl)
-			pods, err := ListPodsForWorkloadSlice(ctx, cl, wl.Namespace, sliceName, client.MatchingFields{indexer.PodNodeSelectorHostnameKey: tc.nodeName})
+			pods, err := workloadslicing.ListPodsForWorkloadSlice(ctx, cl, wl.Namespace, sliceName, client.MatchingFields{indexer.PodNodeSelectorHostnameKey: tc.nodeName})
 			if err != nil {
 				t.Fatalf("Failed to list pods: %v", err)
 			}
