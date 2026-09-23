@@ -142,32 +142,14 @@ func (w *RayClusterWebhook) validateCreate(ctx context.Context, job *rayv1.RayCl
 		spec := &job.Spec
 		specPath := field.NewPath("spec")
 
+		rayClusterSpecErrors := ValidateCreate(job, spec, specPath)
+		allErrors = append(allErrors, rayClusterSpecErrors...)
+		if len(rayClusterSpecErrors) > 0 {
+			return allErrors, nil
+		}
+
 		if isAnElasticJob(job) {
 			allErrors = append(allErrors, validateElasticJob(job)...)
-		} else if ptr.Deref(spec.EnableInTreeAutoscaling, false) {
-			// Should not use auto scaler. Once the resources are reserved by queue the cluster should do its best to use them.
-			allErrors = append(
-				allErrors,
-				field.Invalid(
-					specPath.Child("enableInTreeAutoscaling"),
-					spec.EnableInTreeAutoscaling,
-					fmt.Sprintf("a kueue-managed RayCluster can use autoscaling only as an elastic job: "+
-						"enable the ElasticJobsViaWorkloadSlices feature gate and set the %q: %q annotation",
-						workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue),
-				),
-			)
-		}
-
-		// Should limit the generated PodSet count to the maximum supported by Workloads.
-		if expectedPodSetsCount := ExpectedPodSetsCount(spec); expectedPodSetsCount > jobframework.MaxPodSets {
-			allErrors = append(allErrors, field.TooMany(specPath.Child("workerGroupSpecs"), expectedPodSetsCount, jobframework.MaxPodSets))
-		}
-
-		// None of the workerGroups should be named "head"
-		for i := range spec.WorkerGroupSpecs {
-			if spec.WorkerGroupSpecs[i].GroupName == headGroupPodSetName {
-				allErrors = append(allErrors, field.Forbidden(specPath.Child("workerGroupSpecs").Index(i).Child("groupName"), fmt.Sprintf("%q is reserved for the head group", headGroupPodSetName)))
-			}
 		}
 	}
 
