@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
 	"sigs.k8s.io/kueue/pkg/util/equality"
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
 
 var (
@@ -80,6 +81,7 @@ type RayCluster rayv1.RayCluster
 var _ jobframework.GenericJob = (*RayCluster)(nil)
 var _ jobframework.JobWithManagedBy = (*RayCluster)(nil)
 var _ jobframework.JobWithCustomEquivalenceOptions = (*RayCluster)(nil)
+var _ jobframework.JobWithWorkloadAnnotations = (*RayCluster)(nil)
 
 func (j *RayCluster) CustomEquivalenceOptions(_ context.Context, _ client.Client, _ *kueue.Workload) []equality.ComparePodSetsOption {
 	if !features.Enabled(features.KubeRayEvictOnInconsistentTopologyRequest) {
@@ -126,6 +128,22 @@ func (j *RayCluster) PodSets(ctx context.Context, _ client.Client) ([]kueue.PodS
 		podSets = applyRuntimeCountsAnnotation(ctrl.LoggerFrom(ctx), podSets, j.Object())
 	}
 	return podSets, nil
+}
+
+// WorkloadAnnotations snapshots the runtime-count input, including an explicit
+// empty value when counts came from spec. A missing key means legacy/unknown.
+func (j *RayCluster) WorkloadAnnotations() map[string]string {
+	if !features.Enabled(features.MultiKueueRayInTreeAutoscaling) || !workloadslicing.Enabled(j.Object()) ||
+		ptr.Deref(j.Spec.ManagedBy, "") != kueue.MultiKueueControllerName || !ptr.Deref(j.Spec.EnableInTreeAutoscaling, false) {
+		return nil
+	}
+	value := j.Annotations[RayClusterPodsetReplicaSizesAnnotation]
+	if value != "" {
+		if _, err := ParsePodSetReplicaSizes(value); err != nil {
+			value = ""
+		}
+	}
+	return map[string]string{RayClusterPodsetReplicaSizesAnnotation: value}
 }
 
 func (j *RayCluster) RunWithPodSetsInfo(ctx context.Context, _ client.Client, podSetsInfo []podset.PodSetInfo) error {

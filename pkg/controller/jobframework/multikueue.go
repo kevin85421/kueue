@@ -33,11 +33,11 @@ type MultiKueueAdapter interface {
 	// Copy the status from the remote job if already exists.
 	//
 	// The returned deferred flag reports that the adapter intentionally skipped
-	// propagating the remote Job's status to the local Job (typically because the
+	// synchronizing the remote Job or propagating its status (typically because the
 	// local Job is still suspended and a status patch would violate K8s
 	// suspend-validation rules). It is not an error: the caller should requeue the
 	// workload on a short timer so the sync can be retried once the local Job is
-	// unsuspended. Without that requeue the next reconcile may be up to
+	// ready for synchronization. Without that requeue the next reconcile may be up to
 	// workerLostTimeout away and the local Job's status.Active will not catch up.
 	// See https://github.com/kubernetes-sigs/kueue/issues/11115; for the design
 	// discussion see

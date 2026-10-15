@@ -85,6 +85,9 @@ type ElasticReplicaSync[PtrT objAsPtr[T], T any] struct {
 	// SyncReplicas copies the worker replica counts from src into dst, returning
 	// whether dst changed.
 	SyncReplicas func(dst, src PtrT) bool
+	// NeedsRecreation checks whether a slice handover must replace an existing
+	// autoscaling remote instead of reusing its runtime state.
+	NeedsRecreation func(context.Context, client.Client, string, PtrT) (bool, error)
 	// WorkerReplicas returns the per-worker-group replica counts keyed by PodSet
 	// reference. Used to detect a replica change and its direction.
 	WorkerReplicas func(PtrT) map[kueue.PodSetReference]int32
@@ -221,6 +224,31 @@ func (a *adapter[PtrT, T]) SyncJob(
 	// if the remote exists, copy the status and, for elastic workloads,
 	// propagate any manager-driven worker replica change to the remote.
 	if err == nil {
+		if a.workerOwnsReplicas(localJob) && a.elastic.NeedsRecreation != nil {
+			if !remoteJob.GetDeletionTimestamp().IsZero() {
+				return true, nil
+			}
+			if jobframework.PrebuiltWorkloadNameFor(remoteJob) != workloadName {
+				recreate, err := a.elastic.NeedsRecreation(ctx, localClient, workloadName, remoteJob)
+				if err != nil {
+					return false, err
+				}
+				if recreate {
+					if origin == "" {
+						return false, jobframework.ErrMultiKueueOriginEmpty
+					}
+					if remoteJob.GetLabels()[kueue.MultiKueueOriginLabel] != origin {
+						return false, jobframework.ErrRemoteObjectNotOwnedByMultiKueue
+					}
+					uid, rv := remoteJob.GetUID(), remoteJob.GetResourceVersion()
+					ctrl.LoggerFrom(ctx).
+						V(1).
+						Info("Deleting remote RayCluster with counts incompatible with spec-derived slice", "remoteJob", klog.KObj(remoteJob), "workload", workloadName, "uid", uid)
+					err := remoteClient.Delete(ctx, remoteJob, client.Preconditions{UID: &uid, ResourceVersion: &rv}, client.PropagationPolicy(metav1.DeletePropagationForeground))
+					return true, client.IgnoreNotFound(err)
+				}
+			}
+		}
 		if err := clientutil.PatchStatus(ctx, localClient, localJob, func() (bool, error) {
 			a.copyStatus(localJob, remoteJob)
 			return true, nil

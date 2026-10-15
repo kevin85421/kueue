@@ -54,6 +54,8 @@ const (
 	// RayClusterPodsetReplicaSizesAnnotation is set on the job when autoscaling causes
 	// PodSet replica sizes to differ from the original spec. The value is a JSON
 	// array compatible with []kueue.PodSet, containing only the changed PodSets.
+	// On manager Workloads it snapshots the input used to derive PodSet counts;
+	// an empty value records that the counts came from spec.
 	// This annotation is alpha-level enabled by the ElasticJobsViaWorkloadSlices.
 	RayClusterPodsetReplicaSizesAnnotation = "kueue.x-k8s.io/raycluster-podset-replica-sizes"
 	// RayClusterGenerationAnnotation is set on the job when autoscaling causes

@@ -28,6 +28,9 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/ray"
 	"sigs.k8s.io/kueue/pkg/util/api"
+	"sigs.k8s.io/kueue/pkg/workload"
+	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
+	workloadfinish "sigs.k8s.io/kueue/pkg/workload/finish"
 )
 
 var _ jobframework.MultiKueueAdapter = ray.NewMKAdapter(
@@ -52,7 +55,8 @@ func copyJobSpec(dst, src *rayv1.RayCluster) {
 // onto the manager as annotations (leaving the manager spec untouched).
 func elasticReplicaSync() *ray.ElasticReplicaSync[*rayv1.RayCluster, rayv1.RayCluster] {
 	return &ray.ElasticReplicaSync[*rayv1.RayCluster, rayv1.RayCluster]{
-		SyncReplicas: syncWorkerReplicas,
+		SyncReplicas:    syncWorkerReplicas,
+		NeedsRecreation: needsSpecHandoverRecreation,
 		WorkerReplicas: func(rc *rayv1.RayCluster) map[kueue.PodSetReference]int32 {
 			return WorkerGroupPodCounts(&rc.Spec)
 		},
@@ -132,4 +136,25 @@ func getManagedBy(job *rayv1.RayCluster) *string {
 
 func setManagedBy(job *rayv1.RayCluster, val *string) {
 	job.Spec.ManagedBy = val
+}
+
+// A spec-derived admission starts from the declared baseline. An old remote
+// with different counts must not write its stale runtime demand back over it.
+func needsSpecHandoverRecreation(ctx context.Context, localClient client.Client, workloadName string, remote *rayv1.RayCluster) (bool, error) {
+	wl := &kueue.Workload{}
+	if err := localClient.Get(ctx, client.ObjectKey{Namespace: remote.Namespace, Name: workloadName}, wl); err != nil {
+		return false, err
+	}
+	if !workload.HasQuotaReservation(wl) || workloadevict.IsEvicted(wl) || workloadfinish.IsFinished(wl) {
+		return false, nil
+	}
+	source, recorded := wl.Annotations[RayClusterPodsetReplicaSizesAnnotation]
+	if !recorded || source != "" {
+		return false, nil
+	}
+	podSets, err := BuildPodSets(&remote.Spec, remote.Annotations)
+	if err != nil {
+		return false, err
+	}
+	return !workload.ExtractPodSetCounts(podSets).EqualTo(workload.ExtractPodSetCountsFromWorkload(wl)), nil
 }

@@ -998,6 +998,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 		jobPodSets   []kueue.PodSet
 		jobObject    client.Object
 		jobObjectGVK schema.GroupVersionKind
+		annotations  map[string]string
 	}
 	type want struct {
 		workload          *kueue.Workload
@@ -1017,6 +1018,66 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 		args args
 		want want
 	}{
+
+		"OneWorkloadSlice_SourceUpdatedWithShrink": {
+			args: args{
+				clnt: testWorkloadClientBuilder().WithObjects(testWorkload.Clone().Name("slice").ResourceVersion("1").PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 18).Request(corev1.ResourceCPU, "1").Obj()).Annotation("test.example/source", "runtime").Obj()).
+					Build(),
+				jobPodSets:   []kueue.PodSet{*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()},
+				jobObject:    testJobObject,
+				jobObjectGVK: testJobGVK,
+				annotations:  map[string]string{"test.example/source": ""},
+			},
+			want: want{
+				compatible: true,
+				workload: testWorkload.Clone().
+					Name("slice").
+					ResourceVersion("2").
+					PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()).
+					Annotation("test.example/source", "").
+					Obj(),
+			},
+		},
+
+		"OneWorkloadSlice_SourceUpdatedWithGrowth": {
+			args: args{
+				clnt: testWorkloadClientBuilder().WithObjects(testWorkload.Clone().Name("slice").ResourceVersion("1").PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()).Annotation("test.example/source", "").Obj()).
+					Build(),
+				jobPodSets:   []kueue.PodSet{*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 18).Request(corev1.ResourceCPU, "1").Obj()},
+				jobObject:    testJobObject,
+				jobObjectGVK: testJobGVK,
+				annotations:  map[string]string{"test.example/source": "runtime"},
+			},
+			want: want{
+				compatible: true,
+				workload: testWorkload.Clone().
+					Name("slice").
+					ResourceVersion("2").
+					PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 18).Request(corev1.ResourceCPU, "1").Obj()).
+					Annotation("test.example/source", "runtime").
+					Obj(),
+			},
+		},
+
+		"OneWorkloadSlice_SourceUpdatedWithoutCountChange": {
+			args: args{
+				clnt: testWorkloadClientBuilder().WithObjects(testWorkload.Clone().Name("slice").ResourceVersion("1").PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()).Annotation("test.example/source", "runtime").Obj()).
+					Build(),
+				jobPodSets:   []kueue.PodSet{*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()},
+				jobObject:    testJobObject,
+				jobObjectGVK: testJobGVK,
+				annotations:  map[string]string{"test.example/source": ""},
+			},
+			want: want{
+				compatible: true,
+				workload: testWorkload.Clone().
+					Name("slice").
+					ResourceVersion("2").
+					PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 0).Request(corev1.ResourceCPU, "1").Obj()).
+					Annotation("test.example/source", "").
+					Obj(),
+			},
+		},
 		"FailedListWorkloads": {
 			args: args{
 				clnt: func() client.Client {
@@ -1737,7 +1798,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			ctx, _ := utiltesting.ContextWithLog(t)
-			manager := Manager{Client: tt.args.clnt, Clock: fakeClock}
+			manager := Manager{Client: tt.args.clnt, Clock: fakeClock, WorkloadAnnotations: tt.args.annotations}
 			gotWorkload, gotCompatible, gotError := manager.EnsureWorkloadSlices(ctx, tt.args.jobPodSets, tt.args.jobObject, tt.args.jobObjectGVK)
 			if diff := cmp.Diff(tt.want.error, gotError, cmpopts.EquateErrors()); diff != "" {
 				t.Errorf("EnsureWorkloadSlices() error (-want,+got):\n%s", diff)
