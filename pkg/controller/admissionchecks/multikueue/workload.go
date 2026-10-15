@@ -472,7 +472,7 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 			if deferred {
 				// Eviction re-suspended the local Job; requeue short to retry the
 				// status sync instead of dropping it. See syncDeferredRequeueAfter.
-				log.V(3).Info("Sync deferred until local job is unsuspended; requeuing on short timer")
+				log.V(3).Info("Remote job synchronization deferred; requeuing on short timer")
 				return reconcile.Result{RequeueAfter: syncDeferredRequeueAfter}, nil
 			}
 			return reconcile.Result{}, nil
@@ -639,7 +639,7 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 		if syncDeferred {
 			// The local Job is still suspended; requeue short so the next SyncJob
 			// can propagate the remote status. See syncDeferredRequeueAfter.
-			log.V(3).Info("Sync deferred until local job is unsuspended; requeuing on short timer")
+			log.V(3).Info("Remote job synchronization deferred; requeuing on short timer")
 			requeueAfter = syncDeferredRequeueAfter
 		}
 		return reconcile.Result{RequeueAfter: requeueAfter}, nil

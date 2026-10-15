@@ -1218,7 +1218,11 @@ func (r *JobReconciler) ensureOneWorkload(ctx context.Context, job GenericJob, o
 		// Workload slices allow modifications only to PodSet.Count.
 		// Any other changes will result in the slice being marked as incompatible,
 		// and the workload will fall back to being processed by the original ensureOneWorkload function.
-		wl, compatible, err := r.workloadSlices.EnsureWorkloadSlices(ctx, podSets, object, job.GVK())
+		slicesManager := *r.workloadSlices
+		if provider, ok := job.(JobWithWorkloadAnnotations); ok {
+			slicesManager.WorkloadAnnotations = provider.WorkloadAnnotations()
+		}
+		wl, compatible, err := slicesManager.EnsureWorkloadSlices(ctx, podSets, object, job.GVK())
 		if err != nil {
 			return nil, err
 		}
@@ -1985,6 +1989,15 @@ func ConstructWorkload(ctx context.Context, c client.Client, job GenericJob, lab
 	}
 
 	wl := NewWorkload(newWorkloadName(job, extra), object, podSets, labelKeysToCopy, annotationsToCopy)
+	if provider, ok := job.(JobWithWorkloadAnnotations); ok {
+		annotations := provider.WorkloadAnnotations()
+		if len(annotations) > 0 {
+			if wl.Annotations == nil {
+				wl.Annotations = make(map[string]string)
+			}
+			maps.Copy(wl.Annotations, annotations)
+		}
+	}
 	if wl.Labels == nil {
 		wl.Labels = make(map[string]string)
 	}

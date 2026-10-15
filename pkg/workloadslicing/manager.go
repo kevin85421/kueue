@@ -40,6 +40,9 @@ type Manager struct {
 	Recorder     events.EventRecorder
 	CustomLabels *metrics.CustomLabels
 	RoleTracker  *roletracker.RoleTracker
+	// WorkloadAnnotations describes the source of the supplied PodSets and is
+	// updated atomically with their counts.
+	WorkloadAnnotations map[string]string
 }
 
 // EnsureWorkloadSlices processes the Job object and returns the appropriate workload slice.
@@ -103,18 +106,14 @@ func (r *Manager) EnsureWorkloadSlices(
 					}
 				}
 			}
-			return wl, true, nil
+			return r.updateWorkload(ctx, wl, jobPodSetsCounts)
 		}
 
 		// Allow updating the existing slice if:
 		// a. It hasn't been admitted (no quota reserved), or
 		// b. It's a scale-down event.
 		if !workload.HasQuotaReservation(wl) || ScaledDown(wlPodSetsCounts, jobPodSetsCounts) {
-			workload.ApplyPodSetCounts(wl, jobPodSetsCounts)
-			if err := r.Client.Update(ctx, wl); err != nil {
-				return nil, true, fmt.Errorf("failed to update workload's pod sets counts: %w", err)
-			}
-			return wl, true, nil
+			return r.updateWorkload(ctx, wl, jobPodSetsCounts)
 		}
 
 		// Scale-up on admitted workload → create a new slice.
@@ -136,18 +135,37 @@ func (r *Manager) EnsureWorkloadSlices(
 		}
 
 		if jobPodSetsCounts.EqualTo(selectedCounts) {
-			return selectedWorkload, true, nil
+			return r.updateWorkload(ctx, selectedWorkload, jobPodSetsCounts)
 		}
 
 		if !workload.HasQuotaReservation(selectedWorkload) || ScaledDown(selectedCounts, jobPodSetsCounts) {
-			workload.ApplyPodSetCounts(selectedWorkload, jobPodSetsCounts)
-			if err := r.Client.Update(ctx, selectedWorkload); err != nil {
-				return nil, true, fmt.Errorf("failed to update workload pod set counts: %w", err)
-			}
-			return selectedWorkload, true, nil
+			return r.updateWorkload(ctx, selectedWorkload, jobPodSetsCounts)
 		}
 
 		// Scale-up on admitted selected workload — create a new slice.
 		return nil, true, nil
 	}
+}
+
+func (r *Manager) updateWorkload(ctx context.Context, wl *kueue.Workload, counts workload.PodSetsCounts) (*kueue.Workload, bool, error) {
+	changed := !workload.ExtractPodSetCountsFromWorkload(wl).EqualTo(counts)
+	if changed {
+		workload.ApplyPodSetCounts(wl, counts)
+	}
+	for key, value := range r.WorkloadAnnotations {
+		if old, found := wl.Annotations[key]; !found || old != value {
+			if wl.Annotations == nil {
+				wl.Annotations = make(map[string]string)
+			}
+			wl.Annotations[key] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return wl, true, nil
+	}
+	if err := r.Client.Update(ctx, wl); err != nil {
+		return nil, true, fmt.Errorf("failed to update workload's pod sets counts: %w", err)
+	}
+	return wl, true, nil
 }

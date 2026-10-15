@@ -198,6 +198,12 @@ type JobWithCustomEquivalenceOptions interface {
 	CustomEquivalenceOptions(ctx context.Context, c client.Client, wl *kueue.Workload) []equality.ComparePodSetsOption
 }
 
+// JobWithWorkloadAnnotations supplies annotations describing the current PodSets.
+// They are saved with the PodSets when a workload is created or resized.
+type JobWithWorkloadAnnotations interface {
+	WorkloadAnnotations() map[string]string
+}
+
 // JobWithCustomWorkloadActivation is an optional interface that should be implemented
 // by generic jobs when custom logic is needed to determine whether the workload is active.
 type JobWithCustomWorkloadActivation interface {
