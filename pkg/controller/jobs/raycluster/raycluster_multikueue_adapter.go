@@ -84,20 +84,21 @@ func fetchOwnWorkerState(_ context.Context, _ client.Client, remoteCluster *rayv
 	}, nil
 }
 
-// syncWorkerReplicas copies each worker group's Replicas and NumOfHosts from
-// src into dst, matching groups by name, and returns whether dst changed. Both
-// fields feed the effective per-group pod count that needElasticSync compares
-// (see WorkerGroupPodCounts), so both must be propagated to keep the remote in
-// sync when either changes.
+// syncWorkerReplicas copies each worker group's replica settings from src into
+// dst, matching groups by name, and returns whether dst changed. Replica bounds
+// and NumOfHosts also feed WorkerGroupPodCounts, so they must be propagated along
+// with Replicas to keep the remote's effective pod count in sync.
 func syncWorkerReplicas(dst, src *rayv1.RayCluster) bool {
 	type groupSize struct {
-		replicas   *int32
-		numOfHosts int32
+		replicas    *int32
+		minReplicas *int32
+		maxReplicas *int32
+		numOfHosts  int32
 	}
 	srcSizes := make(map[string]groupSize, len(src.Spec.WorkerGroupSpecs))
 	for i := range src.Spec.WorkerGroupSpecs {
 		wgs := &src.Spec.WorkerGroupSpecs[i]
-		srcSizes[wgs.GroupName] = groupSize{replicas: wgs.Replicas, numOfHosts: wgs.NumOfHosts}
+		srcSizes[wgs.GroupName] = groupSize{replicas: wgs.Replicas, minReplicas: wgs.MinReplicas, maxReplicas: wgs.MaxReplicas, numOfHosts: wgs.NumOfHosts}
 	}
 	changed := false
 	for i := range dst.Spec.WorkerGroupSpecs {
@@ -111,6 +112,22 @@ func syncWorkerReplicas(dst, src *rayv1.RayCluster) bool {
 				wgs.Replicas = nil
 			} else {
 				wgs.Replicas = new(*want.replicas)
+			}
+			changed = true
+		}
+		if !ptr.Equal(wgs.MinReplicas, want.minReplicas) {
+			if want.minReplicas == nil {
+				wgs.MinReplicas = nil
+			} else {
+				wgs.MinReplicas = new(*want.minReplicas)
+			}
+			changed = true
+		}
+		if !ptr.Equal(wgs.MaxReplicas, want.maxReplicas) {
+			if want.maxReplicas == nil {
+				wgs.MaxReplicas = nil
+			} else {
+				wgs.MaxReplicas = new(*want.maxReplicas)
 			}
 			changed = true
 		}

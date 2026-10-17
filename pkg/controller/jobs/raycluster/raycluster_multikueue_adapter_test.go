@@ -64,6 +64,13 @@ func TestMultiKueueAdapter(t *testing.T) {
 	scaleUpWorkloadName := jobframework.GenerateWorkloadNameWithExtra(
 		scaleUpManager.Name, scaleUpManager.UID, gvk, GetWorkloadNameExtraPart(scaleUpManager))
 
+	minScaleUpManager := elasticBuilder.Clone().FirstWorkerGroupReplicas(1, 4, 10).Obj()
+	minScaleUpWorkloadName := jobframework.GenerateWorkloadNameWithExtra(
+		minScaleUpManager.Name, minScaleUpManager.UID, gvk, GetWorkloadNameExtraPart(minScaleUpManager))
+	maxScaleUpManager := elasticBuilder.Clone().FirstWorkerGroupReplicas(5, 0, 4).Obj()
+	maxScaleUpWorkloadName := jobframework.GenerateWorkloadNameWithExtra(
+		maxScaleUpManager.Name, maxScaleUpManager.UID, gvk, GetWorkloadNameExtraPart(maxScaleUpManager))
+
 	cases := map[string]struct {
 		managersRayClusters []rayv1.RayCluster
 		workerRayClusters   []rayv1.RayCluster
@@ -234,6 +241,176 @@ func TestMultiKueueAdapter(t *testing.T) {
 			wantWorkerRayClusters: []rayv1.RayCluster{
 				*rayClusterBuilder.Clone().
 					PrebuiltWorkloadAnnotation("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic minimum decrease": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					Obj(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 4, 10).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, "wl1", "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					Obj(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic maximum decrease": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					Obj(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 4).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, "wl1", "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					Obj(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic minimum increase": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*minScaleUpManager.DeepCopy(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, minScaleUpWorkloadName, "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*minScaleUpManager.DeepCopy(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 4, 10).
+					PrebuiltWorkloadLabel(minScaleUpWorkloadName).
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic maximum increase": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*maxScaleUpManager.DeepCopy(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, maxScaleUpWorkloadName, "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*maxScaleUpManager.DeepCopy(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 4).
+					PrebuiltWorkloadLabel(maxScaleUpWorkloadName).
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic minimum increase with stale slice": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*minScaleUpManager.DeepCopy(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, "wl1", "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*minScaleUpManager.DeepCopy(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(1, 2, 10).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
+		"elastic maximum increase with stale slice": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true, features.WorkloadIdentifierAnnotations: false},
+			managersRayClusters: []rayv1.RayCluster{
+				*maxScaleUpManager.DeepCopy(),
+			},
+			workerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					PrebuiltWorkloadLabel("wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter jobframework.MultiKueueAdapter, managerClient, workerClient client.Client) error {
+				_, err := adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "raycluster1", Namespace: TestNamespace}, "wl1", "origin1")
+				return err
+			},
+			wantManagersRayClusters: []rayv1.RayCluster{
+				*maxScaleUpManager.DeepCopy(),
+			},
+			wantWorkerRayClusters: []rayv1.RayCluster{
+				*elasticBuilder.Clone().
+					FirstWorkerGroupReplicas(5, 0, 2).
+					PrebuiltWorkloadLabel("wl1").
 					Label(kueue.MultiKueueOriginLabel, "origin1").
 					Obj(),
 			},
