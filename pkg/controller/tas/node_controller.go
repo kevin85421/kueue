@@ -209,10 +209,7 @@ func (r *nodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	latePodWorkloads, err := r.getWorkloadsFromPodsOnNode(ctx, req.Name, affectedWorkloads, nodeSelectorPodsByWorkload)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	latePodWorkloads := r.getWorkloadsFromPodsOnNode(ctx, req.Name, affectedWorkloads, nodeSelectorPodsByWorkload)
 	affectedWorkloads = affectedWorkloads.Union(latePodWorkloads)
 
 	return r.reconcileWorkloadsOnNode(ctx, req.Name, node, affectedWorkloads, nodeSelectorPodsByWorkload)
@@ -344,7 +341,7 @@ func (r *nodeReconciler) getWorkloadsFromPodsOnNode(
 	nodeName string,
 	existingWorkloads sets.Set[types.NamespacedName],
 	nodeSelectorPodsByWorkload map[types.NamespacedName][]*corev1.Pod,
-) (sets.Set[types.NamespacedName], error) {
+) sets.Set[types.NamespacedName] {
 	latePodWorkloads := sets.New[types.NamespacedName]()
 	logger := r.logger().V(4).WithValues("node", nodeName)
 	for wlKey := range nodeSelectorPodsByWorkload {
@@ -360,7 +357,7 @@ func (r *nodeReconciler) getWorkloadsFromPodsOnNode(
 			latePodWorkloads.Insert(wlKey)
 		}
 	}
-	return latePodWorkloads, nil
+	return latePodWorkloads
 }
 
 // getWorkloadsOnNodeFromTASAssignment gets all workloads that have the given node assigned in TAS topology assignment
